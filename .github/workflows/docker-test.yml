@@ -1,0 +1,63 @@
+name: Fast Docker Integration Test
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch: # Allows manual triggering for testing
+
+jobs:
+  test-container:
+    # Using self-hosted for GPU. If you don't have one, this will fail
+    # but this is the correct config for the request.
+    runs-on: [self-hosted, linux, gpu]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Pre-clean Zombie Containers
+        run: docker rm -f multilyth-test-instance || true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Container (Lightweight Mode)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          load: true
+          tags: multilyth-test:latest
+          build-args: |
+            OLLAMA_MODEL=tinyllama
+            WHISPER_MODEL=tiny.en
+            WAKEWORD_MODEL=basic
+
+      - name: Run Container
+        run: |
+          docker run -d \
+            --name multilyth-test-instance \
+            --gpus all \
+            -p 11434:11434 \
+            -p 8000:8000 \
+            multilyth-test:latest
+
+      - name: Fast Health Check
+        run: |
+          timeout 60s bash -c 'until curl -s http://localhost:11434/api/tags; do sleep 2; done'
+          timeout 60s bash -c 'until curl -s http://localhost:8000/health; do sleep 2; done'
+
+      - name: Smoke Test (Minimal Payload)
+        run: |
+          curl -s -X POST http://localhost:11434/api/generate \
+            -d '{"model": "tinyllama", "prompt": "hi", "stream": false}' \
+            | grep -q "response"
+
+          curl -s -X POST http://localhost:8000/transcribe \
+            -F "file=@tests/fixtures/tiny_test.wav" \
+            | grep -q "text"
+
+      - name: Cleanup
+        if: always()
+        run: docker rm -f multilyth-test-instance || true
